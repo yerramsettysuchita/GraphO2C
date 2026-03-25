@@ -1,0 +1,82 @@
+name: GraphO2C CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-cov httpx
+
+      - name: Run smoke tests
+        run: |
+          cd backend
+          pytest tests/ -v --tb=short \
+            --cov=. --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CI: "true"
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: backend/coverage.xml
+          fail_ci_if_error: false
+
+  build-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install and build
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Check bundle size (gzip)
+        run: |
+          echo "--- JS bundle sizes ---"
+          for f in frontend-dist/assets/*.js; do
+            gz=$(gzip -c "$f" | wc -c)
+            echo "  $(basename $f): $(( gz / 1024 ))KB gzipped"
+          done
+          GZIP_TOTAL=$(for f in frontend-dist/assets/*.js; do gzip -c "$f" | wc -c; done | awk '{sum+=$1} END {print sum}')
+          echo "Total gzipped JS: $(( GZIP_TOTAL / 1024 ))KB (limit: 300KB)"
+          if [ "$GZIP_TOTAL" -gt 307200 ]; then
+            echo "FAIL: bundle too large (${GZIP_TOTAL} bytes > 307200 bytes)"
+            exit 1
+          fi
+          echo "PASS: bundle within limit"

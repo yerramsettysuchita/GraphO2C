@@ -1,7 +1,10 @@
 # Secrets — never commit
 backend/.env
+frontend/.env
+frontend/.env.local
 
-# DuckDB WAL (temporary write-ahead log — not needed in repo)
+# DuckDB — built at startup from Dataset/ JSONL files
+backend/*.duckdb
 backend/*.duckdb.wal
 
 # Python cache
@@ -18,23 +21,24 @@ venv/
 env/
 ENV/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Dataset — large files, distribute separately
-Dataset/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
 # React build output (built by Render at deploy time)
 frontend-dist/
 
 # Node
 frontend/node_modules/
 
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
 # Logs
 *.log
+
+# Coverage
+backend/coverage.xml
+backend/.coverage

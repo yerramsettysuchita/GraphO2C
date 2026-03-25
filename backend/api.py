@@ -13,13 +13,14 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Optional
 import networkx as nx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from collections import defaultdict
@@ -69,12 +70,53 @@ class _RequestLogger(BaseHTTPMiddleware):
 
 
 app.add_middleware(_RequestLogger)
+
+# CORS — restrict to known origins in production
+_ALLOWED_ORIGINS = [
+    "http://localhost:5173",   # Vite dev server
+    "http://localhost:8000",   # FastAPI serving built frontend
+    "http://127.0.0.1:8000",
+]
+_prod_url = os.environ.get("RENDER_EXTERNAL_URL")
+if _prod_url:
+    _ALLOWED_ORIGINS.append(_prod_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
 )
+
+# API key auth — only active when GRAPHO2C_API_KEY env var is set.
+# /query (POST) is the only protected endpoint.
+# All GET endpoints and static frontend remain public.
+_API_KEY = os.environ.get("GRAPHO2C_API_KEY")
+
+
+@app.middleware("http")
+async def auth_middleware(request: StarletteRequest, call_next):
+    needs_auth = (
+        request.url.path == "/query"
+        and request.method == "POST"
+        and _API_KEY is not None
+    )
+    if needs_auth:
+        provided = (
+            request.headers.get("X-API-Key")
+            or request.headers.get("Authorization", "").replace("Bearer ", "")
+        )
+        if not provided or not secrets.compare_digest(provided, _API_KEY):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "Unauthorized",
+                    "message": "X-API-Key header required for /query",
+                    "hint": "Add header: X-API-Key: <your key>",
+                },
+            )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------

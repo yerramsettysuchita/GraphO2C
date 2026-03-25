@@ -6,11 +6,15 @@ services:
     buildCommand: >
       pip install -r requirements.txt &&
       cd ../frontend &&
-      npm install &&
-      npm run build
+      npm ci &&
+      VITE_API_KEY=$GRAPHO2C_API_KEY npm run build
     startCommand: python main.py
     envVars:
       - key: GROQ_API_KEY
         sync: false          # set manually in Render dashboard — never committed
+      - key: GRAPHO2C_API_KEY
+        sync: false          # generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      - key: RENDER_EXTERNAL_URL
+        value: https://grapho2c.onrender.com
       - key: PORT
         value: 10000

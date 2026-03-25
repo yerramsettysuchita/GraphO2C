@@ -1,5 +1,7 @@
 # GraphO2C — Graph-Based Order-to-Cash Query System
 
+![CI](https://github.com/yerramsettysuchita/GraphO2C/actions/workflows/test.yml/badge.svg)
+
 SAP's Order-to-Cash process spans at least a dozen tables. A sales order becomes a delivery, a delivery becomes an invoice, an invoice becomes a journal entry, and a journal entry becomes a payment. When this data lives in flat tables, connecting those dots takes complex SQL joins across every step. GraphO2C solves that by loading all 20 SAP tables into a single knowledge graph and letting you explore and query the full O2C flow visually and in plain English.
 
 You type a question. The system figures out what SQL to run, runs it against DuckDB, and gives you a grounded answer with the relevant graph nodes highlighted on screen.
