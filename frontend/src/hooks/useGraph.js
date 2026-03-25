@@ -217,7 +217,7 @@ export function useGraph(containerRef) {
 
       cy.add(elements)
       const layout = elements.length > 80 ? 'grid' : 'cose'
-      cy.layout({ name: layout, animate: true, animationDuration: 300, padding: 40 }).run()
+      cy.layout({ name: layout, fit: true, animate: true, animationDuration: 300, padding: 40 }).run()
 
       if (clear && cy.nodes().length > 0) {
         setTimeout(() => cy.nodes()[0].trigger('tap'), 500)
