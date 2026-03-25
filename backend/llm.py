@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ from dotenv import load_dotenv
 # Load .env from the same directory as this file before touching Groq
 load_dotenv(Path(__file__).parent / ".env")
 
-from groq import Groq
+from groq import Groq, RateLimitError
 
 from db import get_connection
 
@@ -360,9 +361,15 @@ RULES:
    JOIN payments p ON p.clearingAccountingDocument = ji.clearingAccountingDocument
    WHERE soh.salesOrder = '<order_id>'
    LIMIT 50
-5. COUNT/TOTAL questions: generate COUNT(*) queries, not SELECT with LIMIT.
-   For "how many X", use: SELECT COUNT(*) AS total_count FROM ...
-   Optionally add a second query for examples with LIMIT 10.
+5. COUNT AND AGGREGATION RULES:
+   If the question asks HOW MANY, COUNT, TOTAL NUMBER, or ANY AGGREGATE —
+   generate a query using COUNT(*) or SUM(). Do NOT use SELECT * with LIMIT.
+   CORRECT: SELECT COUNT(*) AS total FROM sales_order_headers WHERE ...
+   WRONG:   SELECT salesOrder FROM sales_order_headers WHERE ... LIMIT 50
+   For questions asking for BOTH a count AND examples, generate TWO queries
+   separated by a semicolon: first COUNT(*), then SELECT ... LIMIT 10.
+   Example: "SELECT COUNT(*) AS total FROM ...; SELECT ... FROM ... LIMIT 10"
+   LIMIT 50 applies ONLY to row-fetching queries, never to COUNT/SUM queries.
 6. Always add LIMIT 50 on SELECT queries unless user asks for more rows.
 7. Never select * from large tables; always name the columns you need.
 8. When joining billing_document_headers to journal_entry_items, join on
@@ -384,6 +391,15 @@ def _get_client() -> Groq:
             "Add it to backend/.env or export it as an environment variable."
         )
     return Groq(api_key=key)
+
+
+def _call_groq(client: Groq, **kwargs):
+    """Call Groq with one short retry on transient rate limits."""
+    try:
+        return client.chat.completions.create(**kwargs)
+    except RateLimitError:
+        time.sleep(5)
+        return client.chat.completions.create(**kwargs)
 
 
 def _parse_llm_json(text: str) -> dict[str, Any]:
@@ -455,13 +471,14 @@ def _call_step_a(client: Groq, question: str) -> str:
     Ask the LLM to classify the question and generate SQL.
     Returns the raw LLM response content string.
     """
-    response = client.chat.completions.create(
+    response = _call_groq(
+        client,
         model=MODEL,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user",   "content": question},
         ],
-        temperature=0.0,   # deterministic for SQL generation
+        temperature=0.0,
         max_tokens=2048,
     )
     return response.choices[0].message.content.strip()
@@ -479,7 +496,8 @@ def _call_sql_fix(client: Groq, question: str, failed_sql: str, error: str) -> s
         '{"query_type": "sql", "sql": "<corrected SQL>", '
         '"explanation": "<one line description>"}'
     )
-    response = client.chat.completions.create(
+    response = _call_groq(
+        client,
         model=MODEL,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -529,7 +547,8 @@ def _call_step_b(
         "this data. Do not add information not present in the results. "
         "If the result set is empty, say so and suggest a likely reason."
     )
-    response = client.chat.completions.create(
+    response = _call_groq(
+        client,
         model=MODEL,
         messages=[
             {
@@ -604,7 +623,8 @@ def _call_step_b_trace(
         "from the chain. If the flow is incomplete, explain the last "
         "stage reached and what would come next."
     )
-    response = client.chat.completions.create(
+    response = _call_groq(
+        client,
         model=MODEL,
         messages=[
             {
@@ -630,9 +650,14 @@ def _call_step_b_trace(
 # ---------------------------------------------------------------------------
 
 def _execute_sql(sql: str) -> list[dict[str, Any]]:
-    """Execute SQL against DuckDB and return rows as list-of-dicts."""
+    """Execute SQL against DuckDB, handling dual count+sample queries separated by semicolon."""
     conn = get_connection()
-    cur = conn.execute(sql)
+    queries = [q.strip() for q in sql.split(';') if q.strip()]
+    if len(queries) == 2:
+        cur1 = conn.execute(queries[0])
+        cur2 = conn.execute(queries[1])
+        return _rows_to_dicts(cur1) + _rows_to_dicts(cur2)
+    cur = conn.execute(queries[0] if queries else sql)
     return _rows_to_dicts(cur)
 
 
@@ -673,8 +698,29 @@ def run_query(question: str) -> dict[str, Any]:
             "query_type": "error",
         }
 
-    client = _get_client()
+    try:
+        client = _get_client()
+    except RuntimeError as exc:
+        raise exc
 
+    try:
+        return _run_query_inner(question, client)
+    except RateLimitError:
+        logger.warning("Groq rate limit reached")
+        return {
+            "answer": (
+                "The system is currently at capacity. "
+                "Please try again in a few minutes. "
+                "This is a free-tier API rate limit."
+            ),
+            "query_type": "rate_limited",
+            "sql_executed": None,
+            "row_count": 0,
+            "nodes_referenced": [],
+        }
+
+
+def _run_query_inner(question: str, client: Groq) -> dict[str, Any]:
     # ── Trace query fast-path: use graph traversal instead of SQL ──────────
     if is_trace_query(question) and _graph is not None:
         doc_id = extract_document_id(question)
