@@ -30,5 +30,11 @@ Dataset/
 .idea/
 *.swp
 
+# React build output (built by Render at deploy time)
+frontend-dist/
+
+# Node
+frontend/node_modules/
+
 # Logs
 *.log

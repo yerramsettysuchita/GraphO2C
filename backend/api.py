@@ -27,7 +27,7 @@ import logging
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
-_FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+_FRONTEND_DIR  = Path(__file__).parent.parent / "frontend"
 
 logger = logging.getLogger(__name__)
 
@@ -318,20 +318,29 @@ def llm_query(body: QueryRequest):
 
 
 # ---------------------------------------------------------------------------
-# Frontend — serve index.html at / and static assets at /app
+# Frontend — serve built React app (frontend-dist/) at /.
+# Falls back to legacy single-file frontend when dist is not built yet.
 # Must be registered AFTER all API routes so API paths take priority.
 # ---------------------------------------------------------------------------
 
-@app.get("/", include_in_schema=False)
-def root():
-    """Serve the frontend SPA."""
-    index = _FRONTEND_DIR / "index.html"
-    if index.exists():
-        return FileResponse(str(index))
-    return {"message": "GraphO2C API", "docs": "/docs"}
+_FRONTEND_DIST = Path(__file__).parent.parent / "frontend-dist"
 
+if _FRONTEND_DIST.exists():
+    # Production: serve Vite-built React app
+    app.mount(
+        "/",
+        StaticFiles(directory=str(_FRONTEND_DIST), html=True),
+        name="frontend",
+    )
+elif _FRONTEND_DIR.exists():
+    # Dev fallback: legacy single index.html
+    @app.get("/", include_in_schema=False)
+    def root():
+        index = _FRONTEND_DIR / "index.html"
+        if index.exists():
+            return FileResponse(str(index))
+        return {"message": "GraphO2C API", "docs": "/docs"}
 
-if _FRONTEND_DIR.exists():
     app.mount(
         "/app",
         StaticFiles(directory=str(_FRONTEND_DIR), html=True),
