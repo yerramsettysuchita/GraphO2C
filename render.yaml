@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: grapho2c
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false          # set manually in Render dashboard — never committed
+      - key: PORT
+        value: 10000
