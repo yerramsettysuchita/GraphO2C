@@ -2,6 +2,7 @@ services:
   - type: web
     name: grapho2c
     runtime: python
+    plan: starter            # $7/month — always-on, no spin-down, 512MB RAM
     rootDir: backend
     buildCommand: >
       pip install -r requirements.txt &&
@@ -14,6 +15,10 @@ services:
         sync: false          # set manually in Render dashboard — never committed
       - key: GRAPHO2C_API_KEY
         sync: false          # generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      - key: SENTRY_DSN
+        sync: false          # get from sentry.io → New Project → Python → FastAPI
+      - key: ENVIRONMENT
+        value: production
       - key: RENDER_EXTERNAL_URL
         value: https://grapho2c.onrender.com
       - key: PORT

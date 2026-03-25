@@ -39,6 +39,8 @@ jobs:
             --cov-report=xml:coverage.xml
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SENTRY_DSN: ""        # disabled in CI — errors go to test output only
+          ENVIRONMENT: "ci"
           CI: "true"
 
       - name: Upload coverage

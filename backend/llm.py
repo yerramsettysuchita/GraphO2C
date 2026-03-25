@@ -22,6 +22,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import sentry_sdk
+import metrics as _metrics
+
 import networkx as nx
 from dotenv import load_dotenv
 
@@ -394,12 +397,28 @@ def _get_client() -> Groq:
 
 
 def _call_groq(client: Groq, **kwargs):
-    """Call Groq with one short retry on transient rate limits."""
-    try:
-        return client.chat.completions.create(**kwargs)
-    except RateLimitError:
-        time.sleep(5)
-        return client.chat.completions.create(**kwargs)
+    """Call Groq with Sentry performance tracing and one retry on rate limits."""
+    with sentry_sdk.start_span(
+        op="llm.groq",
+        description=f"Groq {kwargs.get('model', 'unknown')} "
+                    f"(temp={kwargs.get('temperature', '?')})",
+    ) as span:
+        span.set_data("max_tokens", kwargs.get("max_tokens"))
+        span.set_data("temperature", kwargs.get("temperature"))
+        start = time.time()
+        try:
+            result = client.chat.completions.create(**kwargs)
+            span.set_data("duration_ms", round((time.time() - start) * 1000))
+            return result
+        except RateLimitError:
+            span.set_data("retried", True)
+            time.sleep(5)
+            result = client.chat.completions.create(**kwargs)
+            span.set_data("duration_ms", round((time.time() - start) * 1000))
+            return result
+        except Exception as exc:
+            span.set_data("error", str(exc))
+            raise
 
 
 def _parse_llm_json(text: str) -> dict[str, Any]:
@@ -676,6 +695,7 @@ def run_query(question: str) -> dict[str, Any]:
     """
     question = question.strip()
     logger.info("Query received: %.120s", question)
+    _metrics.query_count += 1
 
     # ── Guard: empty / length ─────────────────────────────────────────────
     if not question:
@@ -706,7 +726,12 @@ def run_query(question: str) -> dict[str, Any]:
     try:
         return _run_query_inner(question, client)
     except RateLimitError:
+        _metrics.rate_limit_hits += 1
         logger.warning("Groq rate limit reached")
+        sentry_sdk.capture_message(
+            "Groq rate limit hit",
+            level="warning",
+        )
         return {
             "answer": (
                 "The system is currently at capacity. "
@@ -714,6 +739,17 @@ def run_query(question: str) -> dict[str, Any]:
                 "This is a free-tier API rate limit."
             ),
             "query_type": "rate_limited",
+            "sql_executed": None,
+            "row_count": 0,
+            "nodes_referenced": [],
+        }
+    except Exception as exc:
+        _metrics.query_errors += 1
+        logger.exception("Unhandled error in run_query")
+        sentry_sdk.capture_exception(exc)
+        return {
+            "answer": "An unexpected error occurred. Please try again.",
+            "query_type": "error",
             "sql_executed": None,
             "row_count": 0,
             "nodes_referenced": [],

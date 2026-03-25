@@ -12,21 +12,41 @@ Endpoints:
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import time
+import uuid
+from collections import defaultdict
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
 import networkx as nx
+import psutil
+import sentry_sdk
+import metrics as _metrics
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from collections import defaultdict
-import logging
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
+
+# ---------------------------------------------------------------------------
+# Request ID — propagated through ContextVar so every log line carries it
+# ---------------------------------------------------------------------------
+
+request_id_var: ContextVar[str] = ContextVar("request_id", default="--------")
+
+
+class RequestIdFilter(logging.Filter):
+    """Injects request_id into every log record from ContextVar."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_var.get("--------")  # type: ignore[attr-defined]
+        return True
 
 _FRONTEND_DIR  = Path(__file__).parent.parent / "frontend"
 
@@ -117,6 +137,17 @@ async def auth_middleware(request: StarletteRequest, call_next):
                 },
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: StarletteRequest, call_next):
+    """Assign a short ID to every request for log correlation."""
+    req_id = str(uuid.uuid4())[:8]
+    request_id_var.set(req_id)
+    sentry_sdk.set_tag("request_id", req_id)
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = req_id
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -347,16 +378,61 @@ def llm_query(body: QueryRequest):
     Returns grounded natural-language answer plus metadata for graph
     highlighting (nodes_referenced) and debugging (sql_executed).
     """
-    # Import here to avoid circular dependency issues at module load time
     from llm import run_query
     try:
-        return run_query(body.question)
+        result = run_query(body.question)
+        # Tag the active Sentry transaction so traces are filterable
+        sentry_sdk.set_tag("query_type", result.get("query_type", "unknown"))
+        sentry_sdk.set_measurement(
+            "nodes_referenced",
+            len(result.get("nodes_referenced", [])),
+        )
+        return result
     except RuntimeError as exc:
-        # GROQ_API_KEY not configured
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
         logger.exception("Unexpected error in /query")
         raise HTTPException(status_code=500, detail=f"Internal error: {exc}")
+
+
+@app.get("/metrics")
+def operational_metrics():
+    """
+    Live operational snapshot: uptime, query counts, memory, graph size.
+    Read-only — no auth required.
+    """
+    uptime = (datetime.now(timezone.utc) - _metrics.startup_time).total_seconds()
+    try:
+        mem_mb = round(psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024, 1)
+    except Exception:
+        mem_mb = -1
+
+    try:
+        G = _get_graph()
+        graph_info: dict[str, Any] = {
+            "nodes": G.number_of_nodes(),
+            "edges": G.number_of_edges(),
+        }
+    except HTTPException:
+        graph_info = {"nodes": 0, "edges": 0, "status": "initialising"}
+
+    return {
+        "status": "ok",
+        "uptime_seconds": round(uptime),
+        "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m",
+        "graph": graph_info,
+        "queries": {
+            "total": _metrics.query_count,
+            "errors": _metrics.query_errors,
+            "rate_limit_hits": _metrics.rate_limit_hits,
+            "error_rate_pct": round(
+                _metrics.query_errors / max(_metrics.query_count, 1) * 100, 1
+            ),
+        },
+        "memory_mb": mem_mb,
+        "environment": os.environ.get("ENVIRONMENT", "development"),
+        "version": os.environ.get("RENDER_GIT_COMMIT", "local"),
+    }
 
 
 # ---------------------------------------------------------------------------
