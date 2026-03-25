@@ -24,7 +24,7 @@ A separate trace mode handles questions like *"show me the full flow of sales or
 | Analytical queries | DuckDB (file-based, no server needed) |
 | Graph engine | NetworkX (in-memory directed graph) |
 | LLM | Groq API with `llama-3.3-70b-versatile` |
-| Frontend | Vanilla JS with Cytoscape.js, single HTML file |
+| Frontend | React 18 + Vite, Cytoscape.js for graph rendering |
 
 **Why DuckDB instead of Postgres?** The dataset is read-only and analytical. DuckDB reads multi-part JSONL files with a single glob expression and runs fast aggregations without any setup. There is no database server to manage and the file travels with the project.
 
@@ -145,16 +145,36 @@ GraphO2C/
 │   └── 18 more tables ...
 ├── backend/
 │   ├── main.py                  ← Entry point: ingest, build graph, start API
-│   ├── db.py                    ← DuckDB connection (singleton)
-│   ├── ingestion.py             ← Glob-based JSONL ingestion and view creation
+│   ├── db.py                    ← DuckDB singleton connection
+│   ├── ingestion.py             ← Glob-based JSONL ingestion + denormalized views
 │   ├── graph_builder.py         ← Builds the NetworkX DiGraph (13 edge types)
-│   ├── llm.py                   ← Two-step Groq pipeline + trace query logic
-│   ├── api.py                   ← FastAPI route handlers
+│   ├── llm.py                   ← Two-step Groq pipeline + graph trace mode
+│   ├── api.py                   ← FastAPI route handlers + static file serving
+│   ├── metrics.py               ← In-process query/error counters
+│   ├── constants.py             ← Node type colours shared with tests
 │   ├── requirements.txt
-│   ├── render.yaml              ← Single-service Render deployment config
 │   └── .env.example             ← Safe API key template
-└── frontend/
-    └── index.html               ← Full UI in one file, no build step needed
+├── frontend/
+│   ├── src/
+│   │   ├── main.jsx             ← React entry point
+│   │   ├── App.jsx              ← Root layout: TopBar, GraphCanvas, ChatPanel, NodeInspector
+│   │   ├── api.js               ← Typed API client (fetch wrapper)
+│   │   ├── constants.js         ← NODE_COLORS, NODE_TYPES
+│   │   ├── hooks/
+│   │   │   ├── useServer.js     ← Polls /health until graph is ready
+│   │   │   ├── useGraph.js      ← Cytoscape lifecycle: load, expand, highlight, search
+│   │   │   └── useChat.js       ← Chat state, 45s timeout, slow-query indicator
+│   │   └── components/
+│   │       ├── TopBar.jsx       ← Node-type selector, search, graph stats
+│   │       ├── GraphCanvas.jsx  ← Cytoscape mount point
+│   │       ├── ChatPanel.jsx    ← Message list + input
+│   │       ├── NodeInspector.jsx← Properties panel + "View Flow" button
+│   │       └── LoadingOverlay.jsx← Cold-start countdown
+│   ├── index.html               ← Vite HTML shell
+│   └── vite.config.js           ← Outputs to ../frontend-dist/
+├── frontend-dist/               ← Pre-built React bundle (committed — Render serves this)
+├── render.yaml                  ← Single-service Render deployment config
+└── .github/workflows/test.yml   ← CI: pytest + frontend bundle size check
 ```
 
 ---
