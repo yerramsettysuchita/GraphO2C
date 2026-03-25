@@ -21,8 +21,9 @@ venv/
 env/
 ENV/
 
-# React build output (built by Render at deploy time)
-frontend-dist/
+# React build output — committed so Render doesn't need Node at runtime.
+# Rebuild locally with: cd frontend && npm run build
+# frontend-dist/
 
 # Node
 frontend/node_modules/

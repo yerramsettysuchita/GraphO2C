@@ -2,7 +2,7 @@ services:
   - type: web
     name: grapho2c
     runtime: python
-    plan: starter            # $7/month — always-on, no spin-down, 512MB RAM
+    # plan: starter           # Upgrade in Render UI when billing is set up
     rootDir: backend
     buildCommand: >
       pip install -r requirements.txt &&
