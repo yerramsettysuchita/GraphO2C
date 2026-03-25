@@ -7,6 +7,9 @@ frontend/.env.local
 backend/*.duckdb
 backend/*.duckdb.wal
 
+# frontend copied into backend/static by render.yaml build step — never commit
+backend/static/
+
 # Python cache
 __pycache__/
 **/__pycache__/

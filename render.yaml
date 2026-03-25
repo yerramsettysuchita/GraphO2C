@@ -6,22 +6,27 @@ services:
     rootDir: backend
     buildCommand: |
       set -e
-      echo "PWD=$(pwd)"
+      echo "BUILD START - PWD=$(pwd)"
       echo "=== Python deps ==="
       pip install -r requirements.txt
       echo "=== Frontend build ==="
       cd ..
-      echo "PWD=$(pwd)"
+      echo "PARENT PWD=$(pwd)"
       ls -la
+      if [ ! -d "frontend" ]; then echo "ERROR: frontend dir missing"; exit 1; fi
       cd frontend
-      echo "PWD=$(pwd)"
       npm ci
       npm run build
-      echo "=== Verify output ==="
+      echo "=== Verify dist ==="
       ls -la ../frontend-dist/
       ls -la ../frontend-dist/assets/
-      echo "index.html content:"
       cat ../frontend-dist/index.html
+      echo "=== Copy dist into backend/static ==="
+      rm -rf ../backend/static
+      cp -r ../frontend-dist ../backend/static
+      echo "=== Verify backend/static ==="
+      ls -la ../backend/static/
+      ls -la ../backend/static/assets/
       echo "=== Done ==="
     startCommand: python main.py
     envVars:

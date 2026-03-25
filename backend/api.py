@@ -436,24 +436,73 @@ def operational_metrics():
 
 
 # ============================================================
+# DIAGNOSTIC — temporary, shows filesystem layout on Render
+# ============================================================
+
+@app.get("/debug-paths", include_in_schema=False)
+async def debug_paths():
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    results = {}
+    paths_to_check = [
+        ".",
+        "..",
+        "../frontend",
+        "../frontend-dist",
+        "../frontend-dist/assets",
+        "static",
+        "static/assets",
+        "/opt/render/project",
+        "/opt/render/project/src",
+        "/opt/render/project/src/frontend-dist",
+        "/opt/render/project/src/backend",
+        "/opt/render/project/src/backend/static",
+    ]
+    for p in paths_to_check:
+        abs_p = os.path.normpath(os.path.join(here, p)) if not p.startswith("/") else p
+        results[p] = {
+            "absolute": abs_p,
+            "exists": os.path.exists(abs_p),
+            "contents": os.listdir(abs_p)[:20] if os.path.isdir(abs_p) else [],
+        }
+    return {
+        "cwd": os.getcwd(),
+        "here": here,
+        "file": __file__,
+        "paths": results,
+    }
+
+
+# ============================================================
 # STATIC FILE SERVING — must be last, after all API routes
+# Nuclear option: build copies frontend-dist → backend/static
+# so the path is always co-located with api.py, no traversal.
 # ============================================================
 import os as _os
 
 _HERE   = _os.path.dirname(_os.path.abspath(__file__))
-_DIST   = _os.path.normpath(_os.path.join(_HERE, '..', 'frontend-dist'))
-_INDEX  = _os.path.join(_DIST, 'index.html')
-_ASSETS = _os.path.join(_DIST, 'assets')
+# Primary: backend/static/ (copied there by render.yaml build step)
+# Fallback: ../frontend-dist/ (local dev)
+_CANDIDATES = [
+    _os.path.join(_HERE, "static"),
+    _os.path.normpath(_os.path.join(_HERE, "..", "frontend-dist")),
+]
 
-if _os.path.isdir(_ASSETS):
-    app.mount(
-        "/assets",
-        StaticFiles(directory=_ASSETS),
-        name="assets",
-    )
-    print(f"Assets mounted from: {_ASSETS}")
+_DIST = None
+for _c in _CANDIDATES:
+    if _os.path.isfile(_os.path.join(_c, "index.html")):
+        _DIST = _c
+        break
 
-if _os.path.isfile(_INDEX):
+if _DIST is not None:
+    _ASSETS = _os.path.join(_DIST, "assets")
+    _INDEX  = _os.path.join(_DIST, "index.html")
+
+    if _os.path.isdir(_ASSETS):
+        app.mount("/assets", StaticFiles(directory=_ASSETS), name="assets")
+        print(f"Assets mounted from: {_ASSETS}")
+        print(f"Files: {_os.listdir(_ASSETS)}")
+
     @app.get("/", include_in_schema=False)
     async def root():
         return FileResponse(_INDEX)
@@ -463,20 +512,16 @@ if _os.path.isfile(_INDEX):
         return FileResponse(_INDEX)
 
     print(f"Index served from: {_INDEX}")
+
 else:
-    print(f"CRITICAL: index.html not found at {_INDEX}")
+    print("CRITICAL: frontend-dist not found in any candidate location")
+    for _c in _CANDIDATES:
+        print(f"  {_c}: {'EXISTS' if _os.path.exists(_c) else 'MISSING'}")
 
     @app.get("/", include_in_schema=False)
-    async def diagnose():
-        parent = _os.path.normpath(_os.path.join(_HERE, '..'))
-        result: dict = {"cwd": _os.getcwd(), "paths": {}}
-        for name in ['.', '..', '../frontend-dist',
-                     '../frontend', '../frontend-dist/assets']:
-            p = _os.path.normpath(_os.path.join(_HERE, name))
-            result["paths"][name] = {
-                "absolute": p,
-                "exists": _os.path.exists(p),
-                "is_dir": _os.path.isdir(p),
-                "contents": _os.listdir(p) if _os.path.isdir(p) else [],
-            }
-        return result
+    async def root_missing():
+        return {
+            "error": "Frontend not built",
+            "candidates_checked": _CANDIDATES,
+            "hint": "Visit /debug-paths for full filesystem layout",
+        }
