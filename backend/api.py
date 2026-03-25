@@ -435,46 +435,48 @@ def operational_metrics():
     }
 
 
-# ---------------------------------------------------------------------------
-# Frontend — serve built React app (frontend-dist/) at /.
-# Assets are mounted explicitly at /assets so FastAPI routes remain
-# unambiguous.  All unknown paths fall back to index.html (SPA routing).
-# Must be registered AFTER all API routes so API paths take priority.
-# ---------------------------------------------------------------------------
+# ============================================================
+# STATIC FILE SERVING — must be last, after all API routes
+# ============================================================
+import os as _os
 
-_FRONTEND_DIST = Path(__file__).parent.parent / "frontend-dist"
-_ASSETS_DIR    = _FRONTEND_DIST / "assets"
+_HERE   = _os.path.dirname(_os.path.abspath(__file__))
+_DIST   = _os.path.normpath(_os.path.join(_HERE, '..', 'frontend-dist'))
+_INDEX  = _os.path.join(_DIST, 'index.html')
+_ASSETS = _os.path.join(_DIST, 'assets')
 
+if _os.path.isdir(_ASSETS):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_ASSETS),
+        name="assets",
+    )
+    print(f"Assets mounted from: {_ASSETS}")
 
-def _setup_static_serving(application: FastAPI) -> None:
-    if not _FRONTEND_DIST.exists():
-        logger.warning("frontend-dist/ not found — API-only mode")
-        return
+if _os.path.isfile(_INDEX):
+    @app.get("/", include_in_schema=False)
+    async def root():
+        return FileResponse(_INDEX)
 
-    # Explicit assets mount — prevents the catch-all from swallowing them.
-    if _ASSETS_DIR.exists():
-        application.mount(
-            "/assets",
-            StaticFiles(directory=str(_ASSETS_DIR)),
-            name="assets",
-        )
+    @app.get("/index.html", include_in_schema=False)
+    async def index_html():
+        return FileResponse(_INDEX)
 
-    @application.get("/", include_in_schema=False)
-    def _root():
-        return FileResponse(str(_FRONTEND_DIST / "index.html"))
+    print(f"Index served from: {_INDEX}")
+else:
+    print(f"CRITICAL: index.html not found at {_INDEX}")
 
-    @application.get("/{full_path:path}", include_in_schema=False)
-    def _spa_fallback(full_path: str):
-        # Let real API prefixes bubble up as 404 rather than returning HTML.
-        api_prefixes = ("health", "graph", "query", "metrics", "docs", "openapi")
-        if any(full_path.startswith(p) for p in api_prefixes):
-            raise HTTPException(status_code=404, detail="Not found")
-        # Check for a real file inside frontend-dist first.
-        candidate = _FRONTEND_DIST / full_path
-        if candidate.is_file():
-            return FileResponse(str(candidate))
-        # SPA fallback — React Router handles the route client-side.
-        return FileResponse(str(_FRONTEND_DIST / "index.html"))
-
-
-_setup_static_serving(app)
+    @app.get("/", include_in_schema=False)
+    async def diagnose():
+        parent = _os.path.normpath(_os.path.join(_HERE, '..'))
+        result: dict = {"cwd": _os.getcwd(), "paths": {}}
+        for name in ['.', '..', '../frontend-dist',
+                     '../frontend', '../frontend-dist/assets']:
+            p = _os.path.normpath(_os.path.join(_HERE, name))
+            result["paths"][name] = {
+                "absolute": p,
+                "exists": _os.path.exists(p),
+                "is_dir": _os.path.isdir(p),
+                "contents": _os.listdir(p) if _os.path.isdir(p) else [],
+            }
+        return result

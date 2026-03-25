@@ -4,15 +4,25 @@ services:
     runtime: python
     # plan: starter           # Upgrade in Render UI when billing is set up
     rootDir: backend
-    buildCommand: >
-      pip install -r requirements.txt &&
-      echo "=== Building frontend ===" &&
-      cd ../frontend &&
-      npm ci &&
-      VITE_API_KEY=$GRAPHO2C_API_KEY npm run build &&
-      echo "=== frontend-dist contents ===" &&
-      ls -lh ../frontend-dist/ &&
-      ls -lh ../frontend-dist/assets/ || echo "No assets dir"
+    buildCommand: |
+      set -e
+      echo "PWD=$(pwd)"
+      echo "=== Python deps ==="
+      pip install -r requirements.txt
+      echo "=== Frontend build ==="
+      cd ..
+      echo "PWD=$(pwd)"
+      ls -la
+      cd frontend
+      echo "PWD=$(pwd)"
+      npm ci
+      npm run build
+      echo "=== Verify output ==="
+      ls -la ../frontend-dist/
+      ls -la ../frontend-dist/assets/
+      echo "index.html content:"
+      cat ../frontend-dist/index.html
+      echo "=== Done ==="
     startCommand: python main.py
     envVars:
       - key: GROQ_API_KEY
