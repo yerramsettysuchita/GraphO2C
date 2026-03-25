@@ -437,30 +437,44 @@ def operational_metrics():
 
 # ---------------------------------------------------------------------------
 # Frontend — serve built React app (frontend-dist/) at /.
-# Falls back to legacy single-file frontend when dist is not built yet.
+# Assets are mounted explicitly at /assets so FastAPI routes remain
+# unambiguous.  All unknown paths fall back to index.html (SPA routing).
 # Must be registered AFTER all API routes so API paths take priority.
 # ---------------------------------------------------------------------------
 
 _FRONTEND_DIST = Path(__file__).parent.parent / "frontend-dist"
+_ASSETS_DIR    = _FRONTEND_DIST / "assets"
 
-if _FRONTEND_DIST.exists():
-    # Production: serve Vite-built React app
-    app.mount(
-        "/",
-        StaticFiles(directory=str(_FRONTEND_DIST), html=True),
-        name="frontend",
-    )
-elif _FRONTEND_DIR.exists():
-    # Dev fallback: legacy single index.html
-    @app.get("/", include_in_schema=False)
-    def root():
-        index = _FRONTEND_DIR / "index.html"
-        if index.exists():
-            return FileResponse(str(index))
-        return {"message": "GraphO2C API", "docs": "/docs"}
 
-    app.mount(
-        "/app",
-        StaticFiles(directory=str(_FRONTEND_DIR), html=True),
-        name="frontend",
-    )
+def _setup_static_serving(application: FastAPI) -> None:
+    if not _FRONTEND_DIST.exists():
+        logger.warning("frontend-dist/ not found — API-only mode")
+        return
+
+    # Explicit assets mount — prevents the catch-all from swallowing them.
+    if _ASSETS_DIR.exists():
+        application.mount(
+            "/assets",
+            StaticFiles(directory=str(_ASSETS_DIR)),
+            name="assets",
+        )
+
+    @application.get("/", include_in_schema=False)
+    def _root():
+        return FileResponse(str(_FRONTEND_DIST / "index.html"))
+
+    @application.get("/{full_path:path}", include_in_schema=False)
+    def _spa_fallback(full_path: str):
+        # Let real API prefixes bubble up as 404 rather than returning HTML.
+        api_prefixes = ("health", "graph", "query", "metrics", "docs", "openapi")
+        if any(full_path.startswith(p) for p in api_prefixes):
+            raise HTTPException(status_code=404, detail="Not found")
+        # Check for a real file inside frontend-dist first.
+        candidate = _FRONTEND_DIST / full_path
+        if candidate.is_file():
+            return FileResponse(str(candidate))
+        # SPA fallback — React Router handles the route client-side.
+        return FileResponse(str(_FRONTEND_DIST / "index.html"))
+
+
+_setup_static_serving(app)

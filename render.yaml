@@ -6,9 +6,13 @@ services:
     rootDir: backend
     buildCommand: >
       pip install -r requirements.txt &&
+      echo "=== Building frontend ===" &&
       cd ../frontend &&
       npm ci &&
-      VITE_API_KEY=$GRAPHO2C_API_KEY npm run build
+      VITE_API_KEY=$GRAPHO2C_API_KEY npm run build &&
+      echo "=== frontend-dist contents ===" &&
+      ls -lh ../frontend-dist/ &&
+      ls -lh ../frontend-dist/assets/ || echo "No assets dir"
     startCommand: python main.py
     envVars:
       - key: GROQ_API_KEY
