@@ -2,54 +2,81 @@
 
 ![CI](https://github.com/yerramsettysuchita/GraphO2C/actions/workflows/test.yml/badge.svg)
 
-SAP's Order-to-Cash process spans at least a dozen tables. A sales order becomes a delivery, a delivery becomes an invoice, an invoice becomes a journal entry, and a journal entry becomes a payment. When this data lives in flat tables, connecting those dots takes complex SQL joins across every step. GraphO2C solves that by loading all 20 SAP tables into a single knowledge graph and letting you explore and query the full O2C flow visually and in plain English.
+**Live demo:** https://grapho2c.onrender.com
 
-You type a question. The system figures out what SQL to run, runs it against DuckDB, and gives you a grounded answer with the relevant graph nodes highlighted on screen.
+SAP's Order-to-Cash process spans at least a dozen tables. A sales order becomes a delivery, a delivery becomes an invoice, an invoice becomes a journal entry, and a journal entry becomes a payment. When this data lives in flat tables, tracing those connections requires complex SQL joins across every step. GraphO2C solves that by loading all 20 SAP tables into a single knowledge graph and letting you explore and query the full O2C flow visually and in plain English.
+
+You type a question. The system figures out what SQL to run, executes it against DuckDB, and returns a grounded answer with the relevant graph nodes highlighted on screen.
 
 ---
 
 ## What It Does
 
-The application ingests 20 JSONL tables of SAP-style Order-to-Cash data, builds a directed NetworkX graph with 1,262 nodes and 2,059 edges, and exposes both a REST API and a browser-based graph explorer. A Groq-powered LLM pipeline handles natural language questions by generating and executing SQL, then synthesising a human-readable answer from the actual results.
-
-A separate trace mode handles questions like *"show me the full flow of sales order 740506"* by walking the graph directly rather than going through SQL, which gives a richer picture of how one order connects to its deliveries, invoices, journal entries, and payment.
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Backend API | Python 3.10 and FastAPI |
-| Analytical queries | DuckDB (file-based, no server needed) |
-| Graph engine | NetworkX (in-memory directed graph) |
-| LLM | Groq API with `llama-3.3-70b-versatile` |
-| Frontend | React 18 + Vite, Cytoscape.js for graph rendering |
-
-**Why DuckDB instead of Postgres?** The dataset is read-only and analytical. DuckDB reads multi-part JSONL files with a single glob expression and runs fast aggregations without any setup. There is no database server to manage and the file travels with the project.
-
-**Why NetworkX instead of Neo4j?** The graph fits comfortably in memory. Shortest path, neighbor lookup, and BFS are single function calls. Neo4j makes sense when you have tens of millions of nodes, concurrent writes, or need a persistent graph database. For this scale, it would add operational overhead without any benefit.
+- Ingests 20 JSONL tables of SAP-style O2C data into DuckDB
+- Builds a directed NetworkX graph with **1,262 nodes** and **2,059 edges**
+- Visualises the graph in the browser using Cytoscape.js — click any node to inspect its properties and expand its neighbours
+- Accepts natural language questions, generates SQL dynamically, executes it, and returns data-backed answers
+- A separate **trace mode** walks the graph directly for questions like *"show me the full flow of sales order 740506"*, returning the complete chain: SalesOrder → DeliveryItem → BillingDocument → JournalEntry → Payment
+- Highlights the nodes referenced in each answer on the graph automatically
 
 ---
 
-## Graph Schema
+## Architecture Decisions
 
-The graph has nine node types, each mapped from one or more SAP source tables.
+### Why a graph at all?
 
-| Node Type | Source Table | Primary Key |
+The O2C process is inherently relational and directional. A sales order spawns items, items spawn delivery items, delivery items spawn billing documents, billing documents post to journal entries, journal entries clear into payments. Representing this as a directed graph makes traversal and gap detection natural — finding "orders delivered but not billed" is a graph reachability query, not a five-table join.
+
+### Why DuckDB instead of PostgreSQL or SQLite?
+
+The dataset is read-only and analytical. DuckDB reads multi-part JSONL files with a single glob expression (`read_json_auto('folder/part-*.jsonl')`) and runs fast columnar aggregations with no server process, no connection pooling, and no schema migration. The `.duckdb` file travels with the project, making the deployment self-contained. PostgreSQL would add a server to manage and a migration pipeline to maintain with zero benefit for this workload.
+
+### Why NetworkX instead of Neo4j?
+
+At 1,262 nodes and 2,059 edges, the graph fits comfortably in memory. NetworkX gives shortest-path, BFS, and neighbour lookup as single function calls. Neo4j makes sense when you have tens of millions of nodes, concurrent writes, or need a persistent graph database that survives process restarts. For this scale, Neo4j would add significant operational overhead — a separate process, a driver, a query language (Cypher) — without any measurable benefit.
+
+### Why Groq with llama-3.3-70b-versatile?
+
+Groq's inference hardware runs llama-3.3-70b at speeds that make a two-step pipeline (SQL generation then answer synthesis) feel interactive rather than slow. The model is large enough to follow a complex schema prompt reliably and generate correct DuckDB SQL on the first try in the majority of cases.
+
+### Two-step pipeline instead of one prompt
+
+Separating SQL generation from answer synthesis means each step can be tuned independently. SQL generation runs at temperature 0.0 (deterministic, same question always produces the same SQL). Answer synthesis runs at temperature 0.3 (slightly looser for natural language). If they were combined, tuning one would compromise the other.
+
+---
+
+## Database Choice
+
+**DuckDB** is used as the analytical store. Key decisions:
+
+- **Storage:** A single `.duckdb` file committed to the repository. Render serves it without any database server.
+- **Ingestion:** `ingestion.py` reads all `part-*.jsonl` files from each Dataset folder using DuckDB's `read_json_auto` glob. Twenty raw tables are loaded, then two denormalised views (`v_customer`, `v_product`) are created to flatten joins the LLM would otherwise have to reconstruct.
+- **Smart cold start:** On startup, the code checks whether tables already exist. If yes, ingestion is skipped. This means the first deploy is slow (full ingest) but every subsequent restart is fast.
+- **Graph construction:** After ingestion, `graph_builder.py` queries DuckDB to join tables and build all nodes and edges in memory using NetworkX. DuckDB is then used only at query time for SQL-mode answers.
+
+---
+
+## Graph Modelling
+
+The graph has **11 node types** and **13 directed edge types**.
+
+### Node Types
+
+| Node Type | Source | Primary Key |
 |---|---|---|
-| Customer | business_partners joined with addresses and assignments | businessPartner |
-| Product | products joined with product_descriptions | product |
+| Customer | v_customer (business_partners + addresses + assignments) | businessPartner |
+| Product | v_product (products + product_descriptions) | product |
 | Plant | plants | plant |
 | SalesOrder | sales_order_headers | salesOrder |
 | SalesOrderItem | sales_order_items | salesOrder + salesOrderItem |
 | OutboundDelivery | outbound_delivery_headers | deliveryDocument |
 | DeliveryItem | outbound_delivery_items | deliveryDocument + deliveryDocumentItem |
 | BillingDocument | billing_document_headers | billingDocument |
+| BillingDocItem | billing_document_items | billingDocument + billingDocumentItem |
 | JournalEntry | journal_entry_items | companyCode + fiscalYear + accountingDocument + item |
 | Payment | payments | companyCode + fiscalYear + accountingDocument + item |
 
-### The O2C Flow as Graph Edges
+### Edge Types (the O2C flow)
 
 ```
 SalesOrder      ──PLACED_BY──►      Customer
@@ -58,29 +85,66 @@ SalesOrderItem  ──ORDERS_PRODUCT──► Product
 SalesOrderItem  ──PRODUCED_AT──►    Plant
 SalesOrderItem  ──FULFILLED_BY──►   DeliveryItem
 DeliveryItem    ──PART_OF──►        OutboundDelivery
-DeliveryItem    ──BILLED_AS──►      BillingDocumentItem
+DeliveryItem    ──BILLED_AS──►      BillingDocItem
 BillingDocItem  ──BILLED_IN──►      BillingDocument
 BillingDocument ──BILLED_TO──►      Customer
 BillingDocument ──POSTED_TO──►      JournalEntry
+BillingDocument ──CANCELS──►        BillingDocument  (cancellation link)
 JournalEntry    ──CLEARED_BY──►     Payment
 Payment         ──PAID_BY──►        Customer
 ```
 
-Every node ID follows the pattern `TypeName_PrimaryKey`, for example `SalesOrder_740506`, `Customer_310000108`, or `DeliveryItem_80738076_000010`. This makes it trivial to map SQL result columns back to graph nodes for automatic highlighting.
+Every node ID follows the pattern `TypeName_PrimaryKey` — for example `SalesOrder_740506` or `DeliveryItem_80738076_000010`. This convention means SQL result columns can be mapped back to graph nodes for automatic highlighting without any additional lookup.
 
 ---
 
-## How the LLM Pipeline Works
+## LLM Prompting Strategy
 
-The pipeline runs in two steps and uses the Groq API for both.
+The pipeline has two distinct LLM calls per query.
 
-**Step 1 — SQL generation** runs at temperature 0.0. The model receives a system prompt that lists every table, every column, the full O2C join chain, data types (including which fields are boolean versus VARCHAR in DuckDB), SAP status code meanings, and a strict instruction to return only a JSON object with `query_type`, `sql`, and `explanation` fields. The zero temperature means the same question always produces the same SQL, which makes debugging straightforward.
+### Step 1 — SQL Generation (temperature 0.0)
 
-**Step 2 — Answer synthesis** runs at temperature 0.3. The SQL executes against DuckDB and the results (capped at 100 rows) go back to the model with a prompt that says to answer based only on what the data shows, not general knowledge. If the model returns exactly 100 rows, it is warned that results may be truncated and it should not state a definitive count.
+The system prompt is approximately 180 lines and contains:
 
-If the SQL fails, the error message goes back to the model for one correction attempt before the error surfaces to the user.
+1. **Full schema listing** — every table name, every column name, primary keys, and whether the column is a boolean or VARCHAR in DuckDB (this distinction matters because DuckDB booleans do not accept `'X'` or `'true'`, only `TRUE`/`FALSE`)
+2. **Join chain** — the exact sequence of foreign key relationships from `sales_order_headers` through to `payments`
+3. **SAP status code reference** — what `A`, `B`, `C` mean for `overallDeliveryStatus`, `overallGoodsMovementStatus`, and `overallOrdReltdBillgStatus`
+4. **Execution rules** — use DuckDB syntax (`ILIKE`, `TRY_CAST`, `strftime`), no recursive CTEs, default `LIMIT 50` on SELECT queries, return only a JSON envelope: `{"query_type": "sql", "sql": "...", "explanation": "..."}`
+5. **Off-topic instruction** — if the question has nothing to do with the O2C dataset, return the literal string `OFF_TOPIC` with no JSON envelope
 
-**Guardrails.** The system checks for off-topic questions at two points: on the raw model output and again inside the parsed JSON. Questions outside the Order-to-Cash domain get a polite rejection. Input is capped at 500 characters. Testing confirmed that asking "What is the capital of France?" returns the rejection message correctly.
+Temperature 0.0 means the same question always produces the same SQL. This makes regression testing straightforward.
+
+### Step 2 — Answer Synthesis (temperature 0.3)
+
+The SQL executes against DuckDB. The results (capped at 100 rows) are sent back to the LLM with a short prompt that says: answer based only on what the data shows, not on general knowledge. If exactly 100 rows are returned, the model is warned that results may be truncated and must not state a definitive count.
+
+### Trace Mode (graph traversal, no SQL)
+
+For questions containing words like *"trace"*, *"flow"*, *"journey"*, or specific document IDs, the pipeline detects the pattern and switches to graph traversal instead of SQL. It finds the matching node in NetworkX using BFS, collects all reachable O2C nodes in flow order (SalesOrder → SalesOrderItem → DeliveryItem → OutboundDelivery → BillingDocument → JournalEntry → Payment), and sends that structured data to the LLM for synthesis. This gives a richer, path-aware answer that SQL cannot easily produce.
+
+### Automatic SQL Repair
+
+If Step 1 produces SQL that fails on execution, the error message is sent back to the LLM for one correction attempt. Only if the corrected SQL also fails does the error surface to the user.
+
+---
+
+## Guardrails
+
+The system has six layers of guardrail:
+
+| Layer | What it does |
+|---|---|
+| Input length cap | Questions longer than 500 characters are rejected before any LLM call |
+| OFF_TOPIC — raw output check | If the LLM returns the literal string `OFF_TOPIC`, the user gets: *"This system is designed to answer questions related to the Order-to-Cash dataset only."* |
+| OFF_TOPIC — JSON field check | If the parsed JSON has `"sql": "OFF_TOPIC"`, the same rejection fires — prevents envelope manipulation |
+| JSON parse guard | Malformed LLM output triggers an error response rather than a crash |
+| Result truncation warning | If results hit 100 rows, the synthesis prompt warns the model not to state a definitive count |
+| Rate limit handling | Groq `RateLimitError` returns a friendly capacity message rather than a 500 error |
+
+**Tested examples:**
+- *"What is the capital of France?"* → guardrail rejects correctly
+- *"Write me a poem"* → guardrail rejects correctly
+- *"Which products have the most billing documents?"* → SQL generated and executed correctly
 
 ---
 
@@ -88,20 +152,34 @@ If the SQL fails, the error message goes back to the model for one correction at
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/health` | Returns node and edge counts to confirm the graph loaded |
-| GET | `/graph/summary` | Node and edge counts broken down by type |
+| GET | `/health` | Node and edge counts — confirms graph loaded |
+| GET | `/graph/summary` | Counts broken down by node type and edge type |
 | GET | `/graph/nodes?type=X&limit=50` | Paginated list of nodes of a given type |
-| GET | `/graph/node/{node_id}` | All properties of one node plus its immediate neighbours |
+| GET | `/graph/node/{node_id}` | All properties of one node plus its 1-hop neighbours |
 | GET | `/graph/path?from=X&to=Y` | Shortest directed path between two nodes |
-| POST | `/query` | Takes a natural language question and returns a grounded answer |
+| POST | `/query` | Natural language question → grounded answer + nodes referenced |
+| GET | `/metrics` | Live uptime, query count, error rate, memory usage |
 
-The interactive API docs are available at `http://localhost:8000/docs` when running locally.
+Interactive API docs: https://grapho2c.onrender.com/docs
 
 ---
 
-## Running It Locally
+## Example Questions
 
-You need Python 3.10 or above and a free Groq API key from [console.groq.com](https://console.groq.com).
+| Question | Query mode |
+|---|---|
+| Which products are associated with the highest number of billing documents? | SQL — multi-table aggregation |
+| Trace the full flow of sales order 740506 | Graph traversal trace |
+| How many orders were delivered but not billed? | SQL — gap analysis |
+| Which customers have the highest total order value? | SQL — revenue ranking |
+| Show all billing documents that were cancelled | SQL — status filtering |
+| What is the journal entry linked to billing document 90504204? | SQL — document lookup |
+
+---
+
+## Running Locally
+
+Requires Python 3.10+ and a free Groq API key from [console.groq.com](https://console.groq.com).
 
 ```bash
 git clone https://github.com/yerramsettysuchita/GraphO2C.git
@@ -110,28 +188,14 @@ cd GraphO2C/backend
 pip install -r requirements.txt
 
 cp .env.example .env
-# Open .env and paste your key: GROQ_API_KEY=gsk_...
+# Edit .env and set: GROQ_API_KEY=gsk_...
 
 python main.py
 ```
 
-The server starts at `http://localhost:8000`. The first run reads all Dataset files, writes a `grapho2c.duckdb` file, and builds the graph in memory. Every run after that reuses the DuckDB file, so startup is fast. Delete `grapho2c.duckdb` if you want to force a full re-ingestion.
+Open `http://localhost:8000` in your browser.
 
-Open `http://localhost:8000` in your browser to use the graph explorer.
-
----
-
-## Example Questions to Try
-
-These questions were used during testing and cover the main query patterns the system handles.
-
-| Question | What it exercises |
-|---|---|
-| Which products are associated with the highest number of billing documents? | Multi-table aggregation |
-| Trace the full flow of sales order 740506 | Graph traversal trace |
-| Identify sales orders that have been delivered but not billed | Gap analysis with set logic |
-| Which customers have the highest total net amount across all orders? | Revenue ranking |
-| Show all billing documents that were cancelled | Status field filtering |
+The first run ingests all Dataset files and writes `grapho2c.duckdb`. Every subsequent run reuses the file. Delete it to force a full re-ingestion.
 
 ---
 
@@ -140,49 +204,33 @@ These questions were used during testing and cover the main query patterns the s
 ```
 GraphO2C/
 ├── Dataset/                     ← 20 JSONL table folders (SAP O2C data)
-│   ├── sales_order_headers/
-│   ├── billing_document_headers/
-│   └── 18 more tables ...
 ├── backend/
 │   ├── main.py                  ← Entry point: ingest, build graph, start API
 │   ├── db.py                    ← DuckDB singleton connection
-│   ├── ingestion.py             ← Glob-based JSONL ingestion + denormalized views
+│   ├── ingestion.py             ← Glob-based JSONL ingestion + denormalised views
 │   ├── graph_builder.py         ← Builds the NetworkX DiGraph (13 edge types)
 │   ├── llm.py                   ← Two-step Groq pipeline + graph trace mode
-│   ├── api.py                   ← FastAPI route handlers + static file serving
+│   ├── api.py                   ← FastAPI routes + static file serving
 │   ├── metrics.py               ← In-process query/error counters
 │   ├── constants.py             ← Node type colours shared with tests
 │   ├── requirements.txt
-│   └── .env.example             ← Safe API key template
+│   └── .env.example
 ├── frontend/
 │   ├── src/
-│   │   ├── main.jsx             ← React entry point
-│   │   ├── App.jsx              ← Root layout: TopBar, GraphCanvas, ChatPanel, NodeInspector
-│   │   ├── api.js               ← Typed API client (fetch wrapper)
-│   │   ├── constants.js         ← NODE_COLORS, NODE_TYPES
+│   │   ├── App.jsx              ← Root layout
+│   │   ├── api.js               ← Fetch wrapper for all API calls
 │   │   ├── hooks/
 │   │   │   ├── useServer.js     ← Polls /health until graph is ready
 │   │   │   ├── useGraph.js      ← Cytoscape lifecycle: load, expand, highlight, search
 │   │   │   └── useChat.js       ← Chat state, 45s timeout, slow-query indicator
 │   │   └── components/
-│   │       ├── TopBar.jsx       ← Node-type selector, search, graph stats
-│   │       ├── GraphCanvas.jsx  ← Cytoscape mount point
-│   │       ├── ChatPanel.jsx    ← Message list + input
-│   │       ├── NodeInspector.jsx← Properties panel + "View Flow" button
-│   │       └── LoadingOverlay.jsx← Cold-start countdown
-│   ├── index.html               ← Vite HTML shell
-│   └── vite.config.js           ← Outputs to ../frontend-dist/
-├── frontend-dist/               ← Pre-built React bundle (committed — Render serves this)
-├── render.yaml                  ← Single-service Render deployment config
-└── .github/workflows/test.yml   ← CI: pytest + frontend bundle size check
+│   │       ├── TopBar.jsx
+│   │       ├── GraphCanvas.jsx
+│   │       ├── ChatPanel.jsx
+│   │       ├── NodeInspector.jsx
+│   │       └── LoadingOverlay.jsx
+│   └── vite.config.js
+├── frontend-dist/               ← Pre-built bundle (committed — served directly by FastAPI)
+├── render.yaml                  ← Render deployment config
+└── .github/workflows/test.yml   ← CI: pytest + bundle size check
 ```
-
----
-
-## Dataset
-
-The dataset contains SAP-style synthetic Order-to-Cash data split across 20 tables in JSONL format. Download and place it at `GraphO2C/Dataset/` before running.
-
-**Download:** [Google Drive](https://drive.google.com/file/d/1UqaLbFaveV-3MEuiUrzKydhKmkeC1iAL/view)
-
-The tables cover the full O2C cycle: `sales_order_headers`, `sales_order_items`, `sales_order_schedule_lines`, `outbound_delivery_headers`, `outbound_delivery_items`, `billing_document_headers`, `billing_document_items`, `billing_document_cancellations`, `journal_entry_items_accounts_receivable`, `payments_accounts_receivable`, `business_partners`, `business_partner_addresses`, `customer_company_assignments`, `customer_sales_area_assignments`, `products`, `product_descriptions`, `product_plants`, `product_storage_locations`, and `plants`.
