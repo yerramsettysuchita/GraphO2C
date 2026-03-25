@@ -177,8 +177,20 @@ def create_denormalized_views(conn: duckdb.DuckDBPyConnection) -> None:
     logger.info("  %-45s %8d rows", "v_product", count)
 
 
+def _tables_already_loaded(conn: duckdb.DuckDBPyConnection) -> bool:
+    """Return True if the database already contains populated tables (e.g. deployed with pre-built DuckDB)."""
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM sales_order_headers").fetchone()[0]
+        return count > 0
+    except Exception:
+        return False
+
+
 def run_ingestion() -> None:
     conn = get_connection()
+    if _tables_already_loaded(conn):
+        logger.info("=== DuckDB tables already present — skipping ingestion ===")
+        return
     load_raw_tables(conn)
     create_denormalized_views(conn)
     logger.info("=== Ingestion complete ===")

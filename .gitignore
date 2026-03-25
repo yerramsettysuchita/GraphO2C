@@ -1,8 +1,7 @@
 # Secrets — never commit
 backend/.env
 
-# DuckDB database and WAL (regenerated from Dataset on first run)
-backend/*.duckdb
+# DuckDB WAL (temporary write-ahead log — not needed in repo)
 backend/*.duckdb.wal
 
 # Python cache
